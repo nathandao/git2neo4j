@@ -10,9 +10,10 @@ type Credentials struct {
 	Username   string
 	Publickey  string
 	Privatekey string
+	Passphrase string
 }
 
 func (c *Credentials) LibgitCred() (git.ErrorCode, *git.Cred) {
-	ret, cred := git.NewCredSshKey("git", "/Users/nathan/.ssh/id_rsa.pub", "/Users/nathan/.ssh/id_rsa", "")
+	ret, cred := git.NewCredSshKey(c.Username, c.Publickey, c.Privatekey, c.Passphrase)
 	return git.ErrorCode(ret), &cred
 }
