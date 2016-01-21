@@ -14,26 +14,21 @@ import (
 // Ensures git2go Repository struct can be created from a Repository struct.
 func TestGit2goRepo(t *testing.T) {
 	generateTestRepo()
-	cred := dummyCredentials()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := git2neo4j.Repository{
-		Path: path.Join(wd, "test_dir/dummy_repo"),
-		Credentials: git2neo4j.Credentials{
-			Username:   cred.Username,
-			Publickey:  cred.Publickey,
-			Privatekey: cred.Privatekey,
-			Passphrase: cred.Passphrase,
-		},
-	}
+	r := dummyRepository()
 	repo, err := r.Git2goRepo()
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Last check. If repo is a true repo, it should be freed!
 	repo.Free()
+}
+
+func TestFetchRemotes(t *testing.T) {
+	generateTestRepo()
+	r := dummyRepository()
+	if err := r.FetchRemotes(); err != nil {
+		t.Fatal("Failed to fetch remotes with error", err)
+	}
 }
 
 // Credentials acts as a helper to test git2neo4j Credentials.
@@ -103,4 +98,22 @@ func credentialsCallback(url string, username string, allowedTypes git.CredType)
 
 func certificateCheckCallback(cert *git.Certificate, valid bool, hostname string) git.ErrorCode {
 	return 0
+}
+
+func dummyRepository() *git2neo4j.Repository {
+	cred := dummyCredentials()
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Fatal(err)
+	}
+	r := git2neo4j.Repository{
+		Path: path.Join(wd, "test_dir/dummy_repo"),
+		Credentials: git2neo4j.Credentials{
+			Username:   cred.Username,
+			Publickey:  cred.Publickey,
+			Privatekey: cred.Privatekey,
+			Passphrase: cred.Passphrase,
+		},
+	}
+	return &r
 }
