@@ -61,7 +61,7 @@ func generateTestRepo() {
 				CertificateCheckCallback: certificateCheckCallback,
 			},
 		}
-		_, err := git.Clone("git@github.com:nathandao/git-to-json.git", "test_dir/", &cloneOptions)
+		_, err := git.Clone(DummyRepoUrl, "test_dir/", &cloneOptions)
 		if err != nil {
 			log.Fatal(err)
 		}
