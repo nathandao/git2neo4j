@@ -1,24 +1,25 @@
 package git2neo4j_test
 
 import (
-	. "github.com/nathandao/git2neo4j"
 	"os/user"
 	"path"
 	"testing"
 
 	git "github.com/libgit2/git2go"
+	"github.com/nathandao/git2neo4j"
 )
 
+// Ensures that the credentials are properly created
 func TestLibgitCred(t *testing.T) {
 	u, err := user.Current()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// TODO: Read these from conf file
+	// TODO: Read these from a conf file
 	publickey := path.Join(u.HomeDir, ".ssh/id_rsa.pub")
 	privatekey := path.Join(u.HomeDir, ".ssh/id_rsa")
 	passphrase := ""
-	c := Credentials{
+	c := git2neo4j.Credentials{
 		Username:   "git",
 		Publickey:  publickey,
 		Privatekey: privatekey,
