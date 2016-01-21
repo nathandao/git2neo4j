@@ -25,8 +25,8 @@ func TestLibgitCred(t *testing.T) {
 		Privatekey: privatekey,
 		Passphrase: passphrase,
 	}
-	ret, _ := c.LibgitCred()
-	if ret != git.ErrOk {
+	returnCode, _ := c.LibgitCred()
+	if git.ErrorCode(returnCode) != nil {
 		t.Fatal("Failed to create git2go credentials")
 	}
 }

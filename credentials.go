@@ -16,6 +16,6 @@ type Credentials struct {
 // LibgitCred returns a git2go *Cred struct, which is used for remote
 // operations over ssh.
 func (c *Credentials) LibgitCred() (git.ErrorCode, *git.Cred) {
-	ret, cred := git.NewCredSshKey(c.Username, c.Publickey, c.Privatekey, c.Passphrase)
-	return git.ErrorCode(ret), &cred
+	returnCode, credentials := git.NewCredSshKey(c.Username, c.Publickey, c.Privatekey, c.Passphrase)
+	return git.ErrorCode(returnCode), &credentials
 }
