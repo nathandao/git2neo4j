@@ -4,6 +4,9 @@ test_dir/
 # Temp folder
 tmp/
 
+# Confidential files
+config.toml
+
 *.prof
 *.test
 *.swp
