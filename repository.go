@@ -3,9 +3,11 @@ package git2neo4j
 import (
 	"bytes"
 	"encoding/csv"
+	"fmt"
 	"os"
 	"strings"
 
+	"github.com/jmcvetta/neoism"
 	git "github.com/libgit2/git2go"
 )
 
@@ -78,10 +80,17 @@ func (v *Repository) ExportToCsv() error {
 		return err
 	}
 	w := csv.NewWriter(csvFile)
+	defer csvFile.Close()
 	err = w.Write([]string{
-		"hash", "message", "authorName", "authorEmail", "authorTime", "parents",
+		"hash", "message", "author_name", "author_email", "author_time", "parents",
 	})
-	csvFile.Close()
+	if err != nil {
+		return err
+	}
+	w.Flush()
+	if err = w.Error(); err != nil {
+		return err
+	}
 	// Iterate the walk.
 	err = revWalk.Iterate(revWalkHandler)
 	if err != nil {
@@ -91,57 +100,79 @@ func (v *Repository) ExportToCsv() error {
 }
 
 // ImportGraph issues a neo4j cypher to import the exported csv into neo4j.
-// func (v *Repository) ImportGraph() error {
-// 	if err := v.ExportToCsv(); err != nil {
-// 		return err
-// 	}
-// 	r, err := v.Git2GoRepo()
-// 	if err != nil {
-// 		return err
-// 	}
-// 	// # Establish contraints in indexes
-// 	// # TODO: This is only required once during the database setup process.
-// 	// 	session.query('CREATE CONSTRAINT ON (c:Commit) ASSERT c.hash IS UNIQUE')
-// 	// session.query('CREATE INDEX ON :Commit(commit_timestamp)')
-// 	// session.query('CREATE INDEX ON :Commit(message)')
-// 	// session.query('CREATE CONSTRAINT ON (u:User) ASSERT u.email IS UNIQUE')
-// 	// Get full path to csv file
-// 	// Construct cypher query to import CSV.
-// 	cq := neoism.CypherQuery{
-// 		Statement: `
-// USING PERIODIC COMMIT 1000
-// LOAD CSV WITH headers FROM 'file://{csv_file}' as line
+func (v *Repository) ImportGraph() error {
+	// Export data to csv file.
+	if err := v.ExportToCsv(); err != nil {
+		return err
+	}
+	// Connect to Neo4j.
+	settings := GetSettings()
+	db, err := neoism.Connect(settings.DbUrl)
+	if err != nil {
+		return err
+	}
+	// Generate constraints
+	constraints := []neoism.CypherQuery{
+		neoism.CypherQuery{
+			Statement: `CREATE CONSTRAINT ON (r:Repository) ASSERT r.origin_url IS UNIQUE`,
+		},
+		neoism.CypherQuery{
+			Statement: `CREATE CONSTRAINT ON (c:Commit) ASSERT c.hash IS UNIQUE`,
+		},
+	}
+	for _, constraintCq := range constraints {
+		if err = db.Cypher(&constraintCq); err != nil {
+			return err
+		}
+	}
+	// Get csv file path.
+	r, err := v.Git2goRepo()
+	if err != nil {
+		return err
+	}
+	var buffer bytes.Buffer
+	csvFilePath, err := TemporaryCsvPath(r)
+	if err != nil {
+		return err
+	}
+	buffer.WriteString("file://")
+	buffer.WriteString(csvFilePath)
+	csvFilePath = buffer.String()
+	// Construct cypher query to import CSV.
+	cq := neoism.CypherQuery{
+		Statement: `
+USING PERIODIC COMMIT 1000
+LOAD CSV WITH headers FROM {csv_file} as line
 
-// MATCH (r:Repository {id: '{id}'})
-// MERGE (c:Commit {hash: line.hash}) ON CREATE SET
-//   c.message = line.message,
-//   c.author_time = line.author_time,
-//   c.commit_time = line.commit_time,
-//   c.commit_timestamp = toInt(line.commit_timestamp),
-//   c.parents = split(line.parents, ' ')
+MATCH (r:Repository {id: {id}})
+MERGE (c:Commit {hash: line.hash}) ON CREATE SET
+  c.message = line.message,
+  c.author_time = line.author_time,
+  c.parents = split(line.parents, ' ')
 
-// MERGE (r)-[:HAS_COMMIT]->(c)
+MERGE (r)-[:HAS_COMMIT]->(c)
 
-// MERGE (u:User:Author {email:line.author_email}) ON CREATE SET u.name = line.author_name
-// MERGE (u)-[:AUTHORED]->(c)
-// MERGE (c)-[:AUTHORED_BY]->(u)
-// MERGE (u)-[:CONTRIBUTED_TO]->(r)
+MERGE (u:User:Author {email:line.author_email}) ON CREATE SET u.name = line.author_name
+MERGE (u)-[:AUTHORED]->(c)
+MERGE (c)-[:AUTHORED_BY]->(u)
+MERGE (u)-[:CONTRIBUTED_TO]->(r)
 
-// WITH c,line
-// WHERE line.parents <> ''
-// FOREACH (parent_hash in split(line.parents, ' ') |
-//   MERGE (parent:Commit {hash: parent_hash})
-//   MERGE (c)-[:HAS_PARENT]->(parent))
-// `,
-// 	}
-// 	// Send query.
-// 	settings := GetSettings()
-// 	db, err := neoism.Connect(settings.DbUrl)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	return nil
-// }
+WITH c,line
+WHERE line.parents <> ''
+FOREACH (parent_hash in split(line.parents, ' ') |
+  MERGE (parent:Commit {hash: parent_hash})
+  MERGE (c)-[:HAS_PARENT]->(parent))
+`,
+		Parameters: neoism.Props{
+			"csv_file": csvFilePath,
+			"id":       v.Id,
+		},
+	}
+	if err = db.Cypher(&cq); err != nil {
+		return err
+	}
+	return nil
+}
 
 // FetchRemotes executes fetch from remotes. This will update info of all
 // remote refspecs.
@@ -217,16 +248,19 @@ func remoteBranchIteratorHandler(branch *git.Branch, branchType git.BranchType) 
 // commit.
 func revWalkHandler(commit *git.Commit) bool {
 	// Commit info.
-	oid := commit.Id()
-	hash := oid.String()
-	message := commit.Message()
+	hash := commit.Id().String()
+	if hash == "" {
+		fmt.Println(commit)
+		return false
+	}
+	message := strings.Replace(commit.Message(), "\"", "'", -1)
 	// Parent info.
 	parentCount := commit.ParentCount()
 	var buffer bytes.Buffer
 	for i := uint(0); i < parentCount; i = i + 1 {
 		buffer.WriteString(commit.ParentId(i).String())
 		if i < parentCount-1 {
-			buffer.WriteString(",")
+			buffer.WriteString(" ")
 		}
 	}
 	parents := buffer.String()
