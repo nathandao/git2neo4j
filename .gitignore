@@ -1,6 +1,9 @@
 # Dummy files and folders for testing
 test_dir/
 
+# Temp folder
+tmp/
+
 *.prof
 *.test
 *.swp
