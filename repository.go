@@ -1,7 +1,10 @@
 package git2neo4j
 
 import (
-	"fmt"
+	"bytes"
+	"encoding/csv"
+	"os"
+	"strings"
 
 	git "github.com/libgit2/git2go"
 )
@@ -66,7 +69,9 @@ func (v *Repository) FetchRemotes() error {
 	return nil
 }
 
-func (v *Repository) Test() error {
+// ExportToCsv exports the repository commits data to a csv file inside the
+// tmp folder.
+func (v *Repository) ExportToCsv() error {
 	r, err := v.Git2goRepo()
 	if err != nil {
 		return err
@@ -98,6 +103,21 @@ func (v *Repository) Test() error {
 			}
 		}
 	}
+	// Create a new temporary csv export file
+	csvPath, err := TemporaryCsvPath(r)
+	if err != nil {
+		return err
+	}
+	csvFile, err := os.Create(csvPath)
+	if err != nil {
+		return err
+	}
+	w := csv.NewWriter(csvFile)
+	err = w.Write([]string{
+		"hash", "message", "authorName", "authorEmail", "authorTime",
+	})
+	csvFile.Close()
+	// Iterate the walk.
 	err = revWalk.Iterate(revWalkHandler)
 	if err != nil {
 		return err
@@ -121,33 +141,50 @@ func remoteBranchIteratorHandler(branch *git.Branch, branchType git.BranchType) 
 	return nil
 }
 
+// revWalkHandler goes through each commit and creates relevant info for each
+// commit.
 func revWalkHandler(commit *git.Commit) bool {
-	// Get current commit's tree and its first parent's tree.
-	commitTree, err := commit.Tree()
+	// Commit info.
+	oid := commit.Id()
+	hash := oid.String()
+	message := commit.Message()
+	// Author info.
+	authorSig := commit.Author()
+	authorName := authorSig.Name
+	authorEmail := authorSig.Email
+	authorTime := authorSig.When.Format("2006-01-02 15:04:05 +0800")
+	// Write to csvFile
+	r := commit.Owner()
+	csvPath, err := TemporaryCsvPath(r)
 	if err != nil {
 		panic(err)
 	}
-	if parent := commit.Parent(0); parent != nil {
-		parentTree, err := parent.Tree()
-		if err != nil {
-			panic(err)
-		}
-		// Compare the 2 trees to get diff stats.
-		r := commit.Owner()
-		diff, err := r.DiffTreeToTree(parentTree, commitTree, nil)
-		if err != nil {
-			panic(err)
-		}
-		defer diff.Free()
-		diffStat, err := diff.Stats()
-		if err != nil {
-			panic(err)
-		}
-		defer diffStat.Free()
-		deletions := diffStat.Deletions()
-		insertions := diffStat.Insertions()
-		fmt.Println("Additions:", insertions)
-		fmt.Println("Deletions:", deletions)
+	csvFile, err := os.OpenFile(csvPath, os.O_RDWR|os.O_APPEND, 0666)
+	if err != nil {
+		panic(err)
+	}
+	defer csvFile.Close()
+	w := csv.NewWriter(csvFile)
+	err = w.Write([]string{
+		hash, message, authorName, authorEmail, authorTime,
+	})
+	if err != nil {
+		panic(err)
+	}
+	w.Flush()
+	if err = w.Error(); err != nil {
+		panic(err)
 	}
 	return true
+}
+
+// TemoraryCsvPath returns the repository's path to the temp folder.
+func TemporaryCsvPath(r *git.Repository) (string, error) {
+	// Create unique csv file name through path.
+	var buffer bytes.Buffer
+	fileName := strings.Replace(r.Path(), "/", "_", -1)
+	buffer.WriteString("./tmp/")
+	buffer.WriteString(fileName)
+	buffer.WriteString(".csv")
+	return buffer.String(), nil
 }
