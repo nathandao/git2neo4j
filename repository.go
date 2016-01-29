@@ -12,6 +12,8 @@ import (
 // Repository contains a path string to the repository, relative to the folder
 // the command is run from.
 type Repository struct {
+	// The repository's unique id.
+	Id string
 	// Path to the .git file of the repository, which is obtained by using
 	// the parameter --mirror when cloning.
 	// Eg: git clone --mirror git@github.com:youaccount/repo.git
@@ -20,53 +22,16 @@ type Repository struct {
 	Credentials
 }
 
-// Git2goRepo returns the git2go.Repository struct from the Repository's path.
-func (r *Repository) Git2goRepo() (*git.Repository, error) {
-	repo, err := git.OpenRepository(r.Path)
-	return repo, err
+// CertificateCheckCallback is provided as one of the RemoteCallbacks functions
+// during fetch.
+func (r *Repository) CertificateCheckCallback(cert *git.Certificate, valid bool, hostname string) git.ErrorCode {
+	return 0
 }
 
-// FetchRemotes executes fetch from remotes. This will update info of all
-// remote refspecs.
-func (v *Repository) FetchRemotes() error {
-	r, err := v.Git2goRepo()
-	if err != nil {
-		return err
-	}
-	defer r.Free()
-	// Iterate through all remotes and perform fetches.
-	rnames, err := r.Remotes.List()
-	if err != nil {
-		return err
-	}
-	// Remote callbacks that contains required ssh credentials.
-	remotecb := git.RemoteCallbacks{
-		CredentialsCallback:      v.CredentialsCallback,
-		CertificateCheckCallback: v.CertificateCheckCallback,
-	}
-	// Fetch options.
-	fetchoptions := git.FetchOptions{
-		RemoteCallbacks: remotecb,
-		DownloadTags:    git.DownloadTagsAuto,
-		Prune:           git.FetchPruneOn,
-	}
-	for _, rname := range rnames {
-		remote, err := r.Remotes.Lookup(rname)
-		if err != nil {
-			return err
-		}
-		defer remote.Free()
-		// Get refspecs list to be fetched.
-		refspecs, err := remote.FetchRefspecs()
-		if err != nil {
-			return err
-		}
-		// Perform the fetch.
-		if err = remote.Fetch(refspecs, &fetchoptions, ""); err != nil {
-			return err
-		}
-	}
-	return nil
+// CredentialsCallback is provided as one of the RemoteCallbacks functions
+// during fetch.
+func (r *Repository) CredentialsCallback(url string, uname_from_url string, allowed_types git.CredType) (git.ErrorCode, *git.Cred) {
+	return r.Credentials.LibgitCred()
 }
 
 // ExportToCsv exports the repository commits data to a csv file inside the
@@ -114,7 +79,7 @@ func (v *Repository) ExportToCsv() error {
 	}
 	w := csv.NewWriter(csvFile)
 	err = w.Write([]string{
-		"hash", "message", "authorName", "authorEmail", "authorTime",
+		"hash", "message", "authorName", "authorEmail", "authorTime", "parents",
 	})
 	csvFile.Close()
 	// Iterate the walk.
@@ -125,16 +90,123 @@ func (v *Repository) ExportToCsv() error {
 	return nil
 }
 
-// CredentialsCallback is provided as one of the RemoteCallbacks functions
-// during fetch.
-func (r *Repository) CredentialsCallback(url string, uname_from_url string, allowed_types git.CredType) (git.ErrorCode, *git.Cred) {
-	return r.Credentials.LibgitCred()
+// ImportGraph issues a neo4j cypher to import the exported csv into neo4j.
+// func (v *Repository) ImportGraph() error {
+// 	if err := v.ExportToCsv(); err != nil {
+// 		return err
+// 	}
+// 	r, err := v.Git2GoRepo()
+// 	if err != nil {
+// 		return err
+// 	}
+// 	// # Establish contraints in indexes
+// 	// # TODO: This is only required once during the database setup process.
+// 	// 	session.query('CREATE CONSTRAINT ON (c:Commit) ASSERT c.hash IS UNIQUE')
+// 	// session.query('CREATE INDEX ON :Commit(commit_timestamp)')
+// 	// session.query('CREATE INDEX ON :Commit(message)')
+// 	// session.query('CREATE CONSTRAINT ON (u:User) ASSERT u.email IS UNIQUE')
+// 	// Get full path to csv file
+// 	// Construct cypher query to import CSV.
+// 	cq := neoism.CypherQuery{
+// 		Statement: `
+// USING PERIODIC COMMIT 1000
+// LOAD CSV WITH headers FROM 'file://{csv_file}' as line
+
+// MATCH (r:Repository {id: '{id}'})
+// MERGE (c:Commit {hash: line.hash}) ON CREATE SET
+//   c.message = line.message,
+//   c.author_time = line.author_time,
+//   c.commit_time = line.commit_time,
+//   c.commit_timestamp = toInt(line.commit_timestamp),
+//   c.parents = split(line.parents, ' ')
+
+// MERGE (r)-[:HAS_COMMIT]->(c)
+
+// MERGE (u:User:Author {email:line.author_email}) ON CREATE SET u.name = line.author_name
+// MERGE (u)-[:AUTHORED]->(c)
+// MERGE (c)-[:AUTHORED_BY]->(u)
+// MERGE (u)-[:CONTRIBUTED_TO]->(r)
+
+// WITH c,line
+// WHERE line.parents <> ''
+// FOREACH (parent_hash in split(line.parents, ' ') |
+//   MERGE (parent:Commit {hash: parent_hash})
+//   MERGE (c)-[:HAS_PARENT]->(parent))
+// `,
+// 	}
+// 	// Send query.
+// 	settings := GetSettings()
+// 	db, err := neoism.Connect(settings.DbUrl)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	return nil
+// }
+
+// FetchRemotes executes fetch from remotes. This will update info of all
+// remote refspecs.
+func (v *Repository) FetchRemotes() error {
+	r, err := v.Git2goRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Free()
+	// Iterate through all remotes and perform fetches.
+	rnames, err := r.Remotes.List()
+	if err != nil {
+		return err
+	}
+	// Remote callbacks that contains required ssh credentials.
+	remotecb := git.RemoteCallbacks{
+		CredentialsCallback:      v.CredentialsCallback,
+		CertificateCheckCallback: v.CertificateCheckCallback,
+	}
+	// Fetch options.
+	fetchoptions := git.FetchOptions{
+		RemoteCallbacks: remotecb,
+		DownloadTags:    git.DownloadTagsAuto,
+		Prune:           git.FetchPruneOn,
+	}
+	for _, rname := range rnames {
+		remote, err := r.Remotes.Lookup(rname)
+		if err != nil {
+			return err
+		}
+		defer remote.Free()
+		// Get refspecs list to be fetched.
+		refspecs, err := remote.FetchRefspecs()
+		if err != nil {
+			return err
+		}
+		// Perform the fetch.
+		if err = remote.Fetch(refspecs, &fetchoptions, ""); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// CertificateCheckCallback is provided as one of the RemoteCallbacks functions
-// during fetch.
-func (r *Repository) CertificateCheckCallback(cert *git.Certificate, valid bool, hostname string) git.ErrorCode {
-	return 0
+// Git2goRepo returns the git2go.Repository struct from the Repository's path.
+func (r *Repository) Git2goRepo() (*git.Repository, error) {
+	repo, err := git.OpenRepository(r.Path)
+	return repo, err
+}
+
+// TemoraryCsvPath returns the repository's path to the temp folder.
+func TemporaryCsvPath(r *git.Repository) (string, error) {
+	// Create unique csv file name through path.
+	fileName := strings.Replace(r.Path(), "/", "_", -1)
+	var buffer bytes.Buffer
+	// Current path
+	currentPath, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	buffer.WriteString(currentPath)
+	buffer.WriteString("/tmp/")
+	buffer.WriteString(fileName)
+	buffer.WriteString(".csv")
+	return buffer.String(), nil
 }
 
 func remoteBranchIteratorHandler(branch *git.Branch, branchType git.BranchType) error {
@@ -148,6 +220,16 @@ func revWalkHandler(commit *git.Commit) bool {
 	oid := commit.Id()
 	hash := oid.String()
 	message := commit.Message()
+	// Parent info.
+	parentCount := commit.ParentCount()
+	var buffer bytes.Buffer
+	for i := uint(0); i < parentCount; i = i + 1 {
+		buffer.WriteString(commit.ParentId(i).String())
+		if i < parentCount-1 {
+			buffer.WriteString(",")
+		}
+	}
+	parents := buffer.String()
 	// Author info.
 	authorSig := commit.Author()
 	authorName := authorSig.Name
@@ -166,7 +248,7 @@ func revWalkHandler(commit *git.Commit) bool {
 	defer csvFile.Close()
 	w := csv.NewWriter(csvFile)
 	err = w.Write([]string{
-		hash, message, authorName, authorEmail, authorTime,
+		hash, message, authorName, authorEmail, authorTime, parents,
 	})
 	if err != nil {
 		panic(err)
@@ -176,15 +258,4 @@ func revWalkHandler(commit *git.Commit) bool {
 		panic(err)
 	}
 	return true
-}
-
-// TemoraryCsvPath returns the repository's path to the temp folder.
-func TemporaryCsvPath(r *git.Repository) (string, error) {
-	// Create unique csv file name through path.
-	var buffer bytes.Buffer
-	fileName := strings.Replace(r.Path(), "/", "_", -1)
-	buffer.WriteString("./tmp/")
-	buffer.WriteString(fileName)
-	buffer.WriteString(".csv")
-	return buffer.String(), nil
 }
