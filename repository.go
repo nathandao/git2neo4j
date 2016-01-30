@@ -187,6 +187,71 @@ FOREACH (parent_hash in split(line.parents, ' ') |
 	return nil
 }
 
+// importBranchGraph fetches the latest remote branches and add the according
+// relationthips to their target commits.
+func (v *Repository) ImportBranchGraph() error {
+	r, err := v.Git2goRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Free()
+	// Connect to Neo4j.
+	settings := GetSettings()
+	db, err := neoism.Connect(settings.DbUrl)
+	// Remove all current branches before re-fetching remote branches.
+	cq := neoism.CypherQuery{
+		Statement: `MATCH (:Repository {id: {id}})-[:HAS_BRANCH]->(b) DETACH DELETE b`,
+		Parameters: neoism.Props{
+			"id": v.Id,
+		},
+	}
+	if err = db.Cypher(&cq); err != nil {
+		return err
+	}
+	// Add all remote branches to the graph.
+	referenceIterator, err := r.NewReferenceIterator()
+	if err != nil {
+		return err
+	}
+	for {
+		reference, err := referenceIterator.Next()
+		if err != nil {
+			break
+		}
+		if isRemote := reference.IsRemote(); isRemote == true {
+			if target := reference.Target(); target != nil {
+				// Get branch name.
+				branch := reference.Branch()
+				branchName, err := branch.Name()
+				if err != nil {
+					return err
+				}
+				// Get branch last commit target.
+				hash := reference.Target().String()
+				// Add branch to graph db.
+				cq := neoism.CypherQuery{
+					Statement: `
+MATCH (r:Repository {id : {id}})
+WITH r
+MATCH (c:Commit {hash: {hash}})
+WITH r, c
+CREATE (r)-[:HAS_BRANCH]->(:Branch {name: {name}})-[:POINTS_TO]->(c)
+`,
+					Parameters: neoism.Props{
+						"id":   v.Id,
+						"hash": hash,
+						"name": branchName,
+					},
+				}
+				if err = db.Cypher(&cq); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // FetchRemotes executes fetch from remotes. This will update info of all
 // remote refspecs.
 func (v *Repository) FetchRemotes() error {
