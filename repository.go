@@ -101,6 +101,55 @@ func (v *Repository) ExportToCsv() error {
 	return nil
 }
 
+// FetchRemotes executes fetch from remotes. This will update info of all
+// remote refspecs.
+func (v *Repository) FetchRemotes() error {
+	r, err := v.Git2goRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Free()
+	// Iterate through all remotes and perform fetches.
+	rnames, err := r.Remotes.List()
+	if err != nil {
+		return err
+	}
+	// Remote callbacks that contains required ssh credentials.
+	remotecb := git.RemoteCallbacks{
+		CredentialsCallback:      v.CredentialsCallback,
+		CertificateCheckCallback: v.CertificateCheckCallback,
+	}
+	// Fetch options.
+	fetchoptions := git.FetchOptions{
+		RemoteCallbacks: remotecb,
+		DownloadTags:    git.DownloadTagsAuto,
+		Prune:           git.FetchPruneOn,
+	}
+	for _, rname := range rnames {
+		remote, err := r.Remotes.Lookup(rname)
+		if err != nil {
+			return err
+		}
+		defer remote.Free()
+		// Get refspecs list to be fetched.
+		refspecs, err := remote.FetchRefspecs()
+		if err != nil {
+			return err
+		}
+		// Perform the fetch.
+		if err = remote.Fetch(refspecs, &fetchoptions, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Git2goRepo returns the git2go.Repository struct from the Repository's path.
+func (r *Repository) Git2goRepo() (*git.Repository, error) {
+	repo, err := git.OpenRepository(r.Path)
+	return repo, err
+}
+
 // ImportGraph issues a neo4j cypher to import the exported csv into neo4j.
 func (v *Repository) ImportGraph() error {
 	// Export data to csv file.
@@ -252,72 +301,6 @@ CREATE (r)-[:HAS_BRANCH]->(:Branch {name: {name}})-[:POINTS_TO]->(c)
 	return nil
 }
 
-// FetchRemotes executes fetch from remotes. This will update info of all
-// remote refspecs.
-func (v *Repository) FetchRemotes() error {
-	r, err := v.Git2goRepo()
-	if err != nil {
-		return err
-	}
-	defer r.Free()
-	// Iterate through all remotes and perform fetches.
-	rnames, err := r.Remotes.List()
-	if err != nil {
-		return err
-	}
-	// Remote callbacks that contains required ssh credentials.
-	remotecb := git.RemoteCallbacks{
-		CredentialsCallback:      v.CredentialsCallback,
-		CertificateCheckCallback: v.CertificateCheckCallback,
-	}
-	// Fetch options.
-	fetchoptions := git.FetchOptions{
-		RemoteCallbacks: remotecb,
-		DownloadTags:    git.DownloadTagsAuto,
-		Prune:           git.FetchPruneOn,
-	}
-	for _, rname := range rnames {
-		remote, err := r.Remotes.Lookup(rname)
-		if err != nil {
-			return err
-		}
-		defer remote.Free()
-		// Get refspecs list to be fetched.
-		refspecs, err := remote.FetchRefspecs()
-		if err != nil {
-			return err
-		}
-		// Perform the fetch.
-		if err = remote.Fetch(refspecs, &fetchoptions, ""); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Git2goRepo returns the git2go.Repository struct from the Repository's path.
-func (r *Repository) Git2goRepo() (*git.Repository, error) {
-	repo, err := git.OpenRepository(r.Path)
-	return repo, err
-}
-
-// TemoraryCsvPath returns the repository's path to the temp folder.
-func TemporaryCsvPath(r *git.Repository) (string, error) {
-	// Create unique csv file name through path.
-	fileName := strings.Replace(r.Path(), "/", "_", -1)
-	var buffer bytes.Buffer
-	// Current path
-	currentPath, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	buffer.WriteString(currentPath)
-	buffer.WriteString("/tmp/")
-	buffer.WriteString(fileName)
-	buffer.WriteString(".csv")
-	return buffer.String(), nil
-}
-
 func remoteBranchIteratorHandler(branch *git.Branch, branchType git.BranchType) error {
 	return nil
 }
@@ -371,4 +354,21 @@ func revWalkHandler(commit *git.Commit) bool {
 		panic(err)
 	}
 	return true
+}
+
+// TemoraryCsvPath returns the repository's path to the temp folder.
+func TemporaryCsvPath(r *git.Repository) (string, error) {
+	// Create unique csv file name through path.
+	fileName := strings.Replace(r.Path(), "/", "_", -1)
+	var buffer bytes.Buffer
+	// Current path
+	currentPath, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	buffer.WriteString(currentPath)
+	buffer.WriteString("/tmp/")
+	buffer.WriteString(fileName)
+	buffer.WriteString(".csv")
+	return buffer.String(), nil
 }
