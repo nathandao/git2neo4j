@@ -17,6 +17,10 @@ type Settings struct {
 	// Url to acces neo4j. Basic auth can be added here.
 	// E.g: http://user:password@localhost:7474
 	DbUrl string
+	// Path to public and private key to be used for ssh authentication when
+	// fetching repos.
+	Publickey  string
+	Privatekey string
 	// Check if setting is already set.
 	isset bool
 }
