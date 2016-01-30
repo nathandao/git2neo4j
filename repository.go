@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/jmcvetta/neoism"
@@ -82,7 +83,8 @@ func (v *Repository) ExportToCsv() error {
 	w := csv.NewWriter(csvFile)
 	defer csvFile.Close()
 	err = w.Write([]string{
-		"hash", "message", "author_name", "author_email", "author_time", "parents",
+		"hash", "message", "author_name", "author_email", "author_time",
+		"author_timestamp", "parents",
 	})
 	if err != nil {
 		return err
@@ -125,6 +127,16 @@ func (v *Repository) ImportGraph() error {
 			return err
 		}
 	}
+	// Create repo node.
+	cq := neoism.CypherQuery{
+		Statement: `MERGE (:Repository {id: {id}})`,
+		Parameters: neoism.Props{
+			"id": v.Id,
+		},
+	}
+	if err = db.Cypher(&cq); err != nil {
+		return err
+	}
 	// Get csv file path.
 	r, err := v.Git2goRepo()
 	if err != nil {
@@ -139,7 +151,7 @@ func (v *Repository) ImportGraph() error {
 	buffer.WriteString(csvFilePath)
 	csvFilePath = buffer.String()
 	// Construct cypher query to import CSV.
-	cq := neoism.CypherQuery{
+	cq = neoism.CypherQuery{
 		Statement: `
 USING PERIODIC COMMIT 1000
 LOAD CSV WITH headers FROM {csv_file} as line
@@ -148,6 +160,7 @@ MATCH (r:Repository {id: {id}})
 MERGE (c:Commit {hash: line.hash}) ON CREATE SET
   c.message = line.message,
   c.author_time = line.author_time,
+  c.author_timestamp = toInt(line.author_timestamp),
   c.parents = split(line.parents, ' ')
 
 MERGE (r)-[:HAS_COMMIT]->(c)
@@ -269,6 +282,7 @@ func revWalkHandler(commit *git.Commit) bool {
 	authorName := authorSig.Name
 	authorEmail := authorSig.Email
 	authorTime := authorSig.When.Format("2006-01-02 15:04:05 +0800")
+	authorTimestamp := strconv.Itoa(int(authorSig.When.Unix()))
 	// Write to csvFile
 	r := commit.Owner()
 	csvPath, err := TemporaryCsvPath(r)
@@ -282,7 +296,7 @@ func revWalkHandler(commit *git.Commit) bool {
 	defer csvFile.Close()
 	w := csv.NewWriter(csvFile)
 	err = w.Write([]string{
-		hash, message, authorName, authorEmail, authorTime, parents,
+		hash, message, authorName, authorEmail, authorTime, authorTimestamp, parents,
 	})
 	if err != nil {
 		panic(err)
