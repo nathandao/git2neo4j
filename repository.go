@@ -3,7 +3,6 @@ package git2neo4j
 import (
 	"bytes"
 	"encoding/csv"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
