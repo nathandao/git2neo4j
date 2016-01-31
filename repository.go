@@ -463,7 +463,6 @@ RETURN c.hash
 	}
 	// When reaching an existing commit in the database, stop the walk.
 	if size := len(res); size > 0 {
-		fmt.Println("Yolo")
 		return false
 	}
 	// Else, add the commit to the database.
