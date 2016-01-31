@@ -84,7 +84,7 @@ func (v *Repository) ExportToCsv() error {
 	defer csvFile.Close()
 	err = w.Write([]string{
 		"hash", "message", "author_name", "author_email", "author_time",
-		"author_timestamp", "parents",
+		"author_timestamp", "commit_time", "commit_timestamp", "parents",
 	})
 	if err != nil {
 		return err
@@ -165,10 +165,13 @@ func (v *Repository) ImportGraph() error {
 	// Generate constraints
 	constraints := []neoism.CypherQuery{
 		neoism.CypherQuery{
-			Statement: `CREATE CONSTRAINT ON (r:Repository) ASSERT r.origin_url IS UNIQUE`,
+			Statement: `CREATE CONSTRAINT ON (r:Repository) ASSERT r.id IS UNIQUE`,
 		},
 		neoism.CypherQuery{
 			Statement: `CREATE CONSTRAINT ON (c:Commit) ASSERT c.hash IS UNIQUE`,
+		},
+		neoism.CypherQuery{
+			Statement: `CREATE CONSTRAINT ON (a:Author) ASSERT a.email IS UNIQUE`,
 		},
 	}
 	for _, constraintCq := range constraints {
@@ -176,21 +179,23 @@ func (v *Repository) ImportGraph() error {
 			return err
 		}
 	}
+	// Get repo struct.
+	r, err := v.Git2goRepo()
+	if err != nil {
+		return err
+	}
 	// Create repo node.
 	cq := neoism.CypherQuery{
-		Statement: `MERGE (:Repository {id: {id}})`,
+		Statement: `MERGE (r:Repository {id: {id}, path: {path}})`,
 		Parameters: neoism.Props{
-			"id": v.Id,
+			"id":   v.Id,
+			"path": r.Path(),
 		},
 	}
 	if err = db.Cypher(&cq); err != nil {
 		return err
 	}
 	// Get csv file path.
-	r, err := v.Git2goRepo()
-	if err != nil {
-		return err
-	}
 	var buffer bytes.Buffer
 	csvFilePath, err := TemporaryCsvPath(r)
 	if err != nil {
@@ -210,6 +215,8 @@ MERGE (c:Commit {hash: line.hash}) ON CREATE SET
   c.message = line.message,
   c.author_time = line.author_time,
   c.author_timestamp = toInt(line.author_timestamp),
+  c.commit_time = line.commit_time,
+  c.commit_timestamp = toInt(line.commit_timestamp),
   c.parents = split(line.parents, ' ')
 
 MERGE (r)-[:HAS_COMMIT]->(c)
@@ -301,59 +308,51 @@ CREATE (r)-[:HAS_BRANCH]->(:Branch {name: {name}})-[:POINTS_TO]->(c)
 	return nil
 }
 
-func remoteBranchIteratorHandler(branch *git.Branch, branchType git.BranchType) error {
-	return nil
-}
-
-// revWalkHandler goes through each commit and creates relevant info for each
-// commit.
-func revWalkHandler(commit *git.Commit) bool {
-	// Commit info.
-	hash := commit.Id().String()
-	if hash == "" {
-		fmt.Println(commit)
-		return false
+// SyncRemotes checks if there are new commits after fetching new remote data,
+// and update the graph accordingly. If there are new commits, return true.
+func (v *Repository) SyncRemotes() error {
+	// Fetch remotes and go through the updated revwalk.
+	if err := v.FetchRemotes(); err != nil {
+		return err
 	}
-	message := strings.Replace(commit.Message(), "\"", "'", -1)
-	// Parent info.
-	parentCount := commit.ParentCount()
-	var buffer bytes.Buffer
-	for i := uint(0); i < parentCount; i = i + 1 {
-		buffer.WriteString(commit.ParentId(i).String())
-		if i < parentCount-1 {
-			buffer.WriteString(" ")
+	r, err := v.Git2goRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Free()
+	// Iterate through all refs to get the starting Oid for the walk.
+	referenceIterator, err := r.NewReferenceIterator()
+	if err != nil {
+		return err
+	}
+	defer referenceIterator.Free()
+	for {
+		reference, err := referenceIterator.Next()
+		if err != nil {
+			break
+		}
+		defer reference.Free()
+		if isRemote := reference.IsRemote(); isRemote == true {
+			if target := reference.Target(); target != nil {
+				// Initiate the walk.
+				revWalk, err := r.Walk()
+				if err != nil {
+					return err
+				}
+				defer revWalk.Free()
+				if err = revWalk.Push(target); err != nil {
+					return err
+				}
+				// Iterate the walk.
+				revWalk.Sorting(git.SortTime)
+				err = revWalk.Iterate(revWalkSyncHandler)
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
-	parents := buffer.String()
-	// Author info.
-	authorSig := commit.Author()
-	authorName := authorSig.Name
-	authorEmail := authorSig.Email
-	authorTime := authorSig.When.Format("2006-01-02 15:04:05 +0800")
-	authorTimestamp := strconv.Itoa(int(authorSig.When.Unix()))
-	// Write to csvFile
-	r := commit.Owner()
-	csvPath, err := TemporaryCsvPath(r)
-	if err != nil {
-		panic(err)
-	}
-	csvFile, err := os.OpenFile(csvPath, os.O_RDWR|os.O_APPEND, 0666)
-	if err != nil {
-		panic(err)
-	}
-	defer csvFile.Close()
-	w := csv.NewWriter(csvFile)
-	err = w.Write([]string{
-		hash, message, authorName, authorEmail, authorTime, authorTimestamp, parents,
-	})
-	if err != nil {
-		panic(err)
-	}
-	w.Flush()
-	if err = w.Error(); err != nil {
-		panic(err)
-	}
-	return true
+	return nil
 }
 
 // TemoraryCsvPath returns the repository's path to the temp folder.
@@ -371,4 +370,163 @@ func TemporaryCsvPath(r *git.Repository) (string, error) {
 	buffer.WriteString(fileName)
 	buffer.WriteString(".csv")
 	return buffer.String(), nil
+}
+
+func remoteBranchIteratorHandler(branch *git.Branch, branchType git.BranchType) error {
+	return nil
+}
+
+// revWalkHandler goes through each commit and creates relevant info for each
+// commit.
+func revWalkHandler(commit *git.Commit) bool {
+	// Commit info.
+	hash := commit.Id().String()
+	if hash == "" {
+		return false
+	}
+	message := strings.Replace(commit.Message(), "\"", "'", -1)
+	// Parent info.
+	parentCount := commit.ParentCount()
+	var buffer bytes.Buffer
+	for i := uint(0); i < parentCount; i = i + 1 {
+		buffer.WriteString(commit.ParentId(i).String())
+		if i < parentCount-1 {
+			buffer.WriteString(" ")
+		}
+	}
+	parents := buffer.String()
+	// Author info.
+	authorSig := commit.Author()
+	authorName := authorSig.Name
+	authorEmail := authorSig.Email
+	authorTime := authorSig.When.Format("2006-01-02 15:04:05 +0000")
+	authorTimestamp := strconv.Itoa(int(authorSig.When.Unix()))
+	// Committer info.
+	committerSig := commit.Committer()
+	commitTime := committerSig.When.Format("2006-01-02 15:04:05 +0000")
+	commitTimestamp := strconv.Itoa(int(committerSig.When.Unix()))
+	// Write to csvFile
+	r := commit.Owner()
+	csvPath, err := TemporaryCsvPath(r)
+	if err != nil {
+		panic(err)
+	}
+	csvFile, err := os.OpenFile(csvPath, os.O_RDWR|os.O_APPEND, 0666)
+	if err != nil {
+		panic(err)
+	}
+	defer csvFile.Close()
+	w := csv.NewWriter(csvFile)
+	err = w.Write([]string{
+		hash, message, authorName, authorEmail, authorTime, authorTimestamp,
+		commitTime, commitTimestamp, parents,
+	})
+	if err != nil {
+		panic(err)
+	}
+	w.Flush()
+	if err = w.Error(); err != nil {
+		panic(err)
+	}
+	return true
+}
+
+// revWalkSyncHandler adds new commits to the repo graph.
+// The walk stops when reaching the previous lastest commit in the database.
+func revWalkSyncHandler(commit *git.Commit) bool {
+	// Get repo path.
+	r := commit.Owner()
+	path := r.Path()
+	// Commit info.
+	hash := commit.Id().String()
+	settings := GetSettings()
+	db, err := neoism.Connect(settings.DbUrl)
+	if err != nil {
+		panic(err)
+	}
+	res := []struct {
+		Hash string `json:"c.hash"`
+	}{}
+	cq := neoism.CypherQuery{
+		Statement: `
+MATCH (:Repository {path: {path}})-[:HAS_COMMIT]->(c:Commit {hash: {hash}})
+RETURN c.hash
+`,
+		Parameters: neoism.Props{
+			"hash": hash,
+			"path": path,
+		},
+		Result: &res,
+	}
+	if err = db.Cypher(&cq); err != nil {
+		panic(err)
+	}
+	// When reaching an existing commit in the database, stop the walk.
+	if size := len(res); size > 0 {
+		fmt.Println("Yolo")
+		return false
+	}
+	// Else, add the commit to the database.
+	message := strings.Replace(commit.Message(), "\"", "'", -1)
+	// Parent info.
+	parentCount := commit.ParentCount()
+	var buffer bytes.Buffer
+	for i := uint(0); i < parentCount; i = i + 1 {
+		buffer.WriteString(commit.ParentId(i).String())
+		if i < parentCount-1 {
+			buffer.WriteString(" ")
+		}
+	}
+	parents := buffer.String()
+	// Author info.
+	authorSig := commit.Author()
+	authorName := authorSig.Name
+	authorEmail := authorSig.Email
+	authorTime := authorSig.When.Format("2006-01-02 15:04:05 +0000")
+	authorTimestamp := strconv.Itoa(int(authorSig.When.Unix()))
+	// Committer info.
+	committerSig := commit.Committer()
+	commitTime := committerSig.When.Format("2006-01-02 15:04:05 +0000")
+	commitTimestamp := strconv.Itoa(int(committerSig.When.Unix()))
+	// Add accoding info to the graph.
+	commitCq := neoism.CypherQuery{
+		Statement: `
+MATCH (r:Repository {path: {path}})
+CREATE (r)-[:HAS_COMMIT]->(c:Commit {
+  message: {message},
+  author_time: {author_time},
+  author_timestamp: toInt({author_timestamp}),
+  commit_time: {commit_time},
+  commit_timestamp: toInt({commit_timestamp}),
+  hash: {hash},
+  parents: split({parents}, ' ')})
+
+MERGE (u:User:Author {email: {author_email}}) ON CREATE SET u.name = {author_name}
+MERGE (u)-[:AUTHORED]->(c)
+MERGE (c)-[:AUTHORED_BY]->(u)
+MERGE (u)-[:CONTRIBUTED_TO]->(r)
+
+WITH c
+WHERE {parents} <> ''
+FOREACH (parent_hash in split({parents}, ' ') |
+  MERGE (parent:Commit {hash: parent_hash})
+  MERGE (c)-[:HAS_PARENT]->(parent))
+`,
+		Parameters: neoism.Props{
+			"path":             path,
+			"hash":             hash,
+			"message":          message,
+			"author_name":      authorName,
+			"author_email":     authorEmail,
+			"author_time":      authorTime,
+			"author_timestamp": authorTimestamp,
+			"commit_time":      commitTime,
+			"commit_timestamp": commitTimestamp,
+			"parents":          parents,
+		},
+	}
+	if err = db.Cypher(&commitCq); err != nil {
+		return false
+	}
+	return true
 }
